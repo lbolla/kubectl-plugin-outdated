@@ -1,0 +1,3 @@
+name: "outdated"
+shortDesc: "Find outdated packages"
+command: "python3 outdated.py"
