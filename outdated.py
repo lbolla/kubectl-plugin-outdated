@@ -112,7 +112,7 @@ class DockerHub(Repo):
         c.request('GET', url)
         r = c.getresponse()
         if r.status != 200:
-            logging.warning('hub.docker.com failed')
+            logging.warning('hub.docker.com failed for %s', url)
             return None
         data = json.load(r)
         tags = sorted([
@@ -136,7 +136,7 @@ class GoogleContainerRegistry(Repo):
         try:
             output = subprocess.check_output(args)
         except Exception:
-            logging.warning('gcloud failed')
+            logging.warning('gcloud failed for %s', path)
             return tags
         lines = output.decode('utf8').splitlines()
         for l in lines[1:]:
