@@ -17,7 +17,7 @@ class KubeObject:
         self._spec = spec
 
 
-class Deployment(KubeObject):
+class Workload(KubeObject):
 
     def __init__(self, spec):
         self._spec = spec
@@ -25,7 +25,8 @@ class Deployment(KubeObject):
     @property
     def full_name(self):
         meta = self._spec['metadata']
-        return '{}/{}'.format(meta['namespace'], meta['name'])
+        return '{}:{}/{}'.format(
+            self.__class__.__name__, meta['namespace'], meta['name'])
 
     @property
     def containers(self):
@@ -36,6 +37,14 @@ class Deployment(KubeObject):
     @property
     def images(self):
         return [c.image for c in self.containers]
+
+
+class Deployment(Workload):
+    pass
+
+
+class DaemonSet(Workload):
+    pass
 
 
 class Container(KubeObject):
@@ -107,6 +116,9 @@ class UnkonwnRepo(Repo):
 class DockerHub(Repo):
 
     def latest_available_tag(self, path):
+        # No group for image defaults to "library"
+        if '/' not in path:
+            path = 'library/{}'.format(path)
         url = '/v2/repositories/' + path + '/tags/'
         c = http.client.HTTPSConnection('hub.docker.com')
         c.request('GET', url)
@@ -150,16 +162,27 @@ class GoogleContainerRegistry(Repo):
         return None
 
 
-rs = kubectl('get deployments --all-namespaces')
-deployments = [Deployment(spec) for spec in rs['items']]
+def main():
 
-for d in deployments:
-    for i in d.images:
-        tag = i.repo.latest_available_tag(i.path)
-        if (
-                tag is not None and
-                i.tag != 'latest' and
-                parse_version(i.tag) < parse_version(tag)
-        ):
-            print('{:40} {:>70} -> {:20}'.format(
-                d.full_name, i.full_url, tag))
+    rs = kubectl('get deployments --all-namespaces')
+    deployments = [Deployment(spec) for spec in rs['items']]
+
+    rs = kubectl('get daemonsets --all-namespaces')
+    daemonsets = [DaemonSet(spec) for spec in rs['items']]
+
+    workloads = deployments + daemonsets
+
+    for w in workloads:
+        for i in w.images:
+            tag = i.repo.latest_available_tag(i.path)
+            if (
+                    tag is not None and
+                    i.tag != 'latest' and
+                    parse_version(i.tag) < parse_version(tag)
+            ):
+                print('{:40} {:>70} -> {:20}'.format(
+                    w.full_name, i.full_url, tag))
+
+
+if __name__ == '__main__':
+    main()
