@@ -1,8 +1,13 @@
+#!/usr/bin/env python3
+import distutils.spawn
 import json
 import logging
 import subprocess
 import http.client
 from pkg_resources import parse_version
+
+
+HAS_GCLOUD = bool(distutils.spawn.find_executable('gcloud'))
 
 
 def kubectl(cmd):
@@ -71,11 +76,10 @@ class Image:
         tokens = self.full_url.rsplit(':', 1)
         url = tokens[0]
         tokens = url.split('/', 1)
-        if len(tokens) == 1:
-            return Repo.from_url(None)
-        if '.' not in tokens[0]:
-            return Repo.from_url(None)
-        return Repo.from_url(tokens[0])
+        if len(tokens) == 1 or '.' not in tokens[0]:
+            return Repo.from_host('hub.docker.com')
+        else:
+            return Repo.from_host(tokens[0])
 
     @property
     def path(self):
@@ -93,24 +97,46 @@ class Image:
             self.repo, self.path, self.tag)
 
 
+class CheckFailed(RuntimeError):
+    pass
+
+
 class Repo:
 
+    def __init__(self, host):
+        self.host = host
+
     @classmethod
-    def from_url(cls, url):
-        if url is None or url == 'hub.docker.com':
-            return DockerHub()
-        if url == 'gcr.io':
-            return GoogleContainerRegistry()
-        return UnkonwnRepo(url)
+    def from_host(cls, host):
+        if host == 'hub.docker.com':
+            # Endpoints on hub.docker.com don't need authentication.
+            return DockerHub(host)
+        elif HAS_GCLOUD and (host == 'gcr.io' or host.endswith('.gcr.io')):
+            # Prefer calling gcloud, to handle private repos.
+            return GoogleContainerRegistry(host)
+        else:
+            return DockerRegistry(host)
 
     def latest_available_tag(self, path):
         return None
 
+    def _fetch_json(self, host, url):
+        c = http.client.HTTPSConnection(host)
+        try:
+            c.request('GET', url)
+        except OSError as e:
+            raise CheckFailed('Request to https://{}{} failed: {}'.format(
+                host, url, e))
 
-class UnkonwnRepo(Repo):
+        r = c.getresponse()
+        if r.status == 401:
+            raise CheckFailed(
+                "Registry {} requires authentication, skipping".format(host))
+        elif r.status != 200:
+            raise CheckFailed('Request at https://{}{} returned: {}'.format(
+                host, url, r.status))
 
-    def __init__(self, url):
-        self._url = url
+        return json.load(r)
 
 
 class DockerHub(Repo):
@@ -119,21 +145,47 @@ class DockerHub(Repo):
         # No group for image defaults to "library"
         if '/' not in path:
             path = 'library/{}'.format(path)
+
         url = '/v2/repositories/' + path + '/tags/'
-        c = http.client.HTTPSConnection('hub.docker.com')
-        c.request('GET', url)
-        r = c.getresponse()
-        if r.status != 200:
-            logging.warning('hub.docker.com failed for %s', url)
+        data = self._fetch_json(self.host, url)
+        if data is None:
             return None
-        data = json.load(r)
+
         tags = sorted([
             r['name']
             for r in data['results']
         ], key=lambda t: parse_version(t))
-        if tags:
-            return tags[-1]
-        return None
+
+        if not tags:
+            raise CheckFailed("No tags found for {}".format(path))
+
+        return tags[-1]
+
+
+class DockerRegistry(Repo):
+
+    def latest_available_tag(self, path):
+        host = self.host
+        if '/' not in path:
+            if host == 'k8s.gcr.io':
+                # Use the public endpoint instead:
+                host = 'gcr.io'
+                path = 'google-containers/{}'.format(path)
+            else:
+                path = 'library/{}'.format(path)
+
+        url = '/v2/' + path + '/tags/list'
+        data = self._fetch_json(host, url)
+        if data is None:
+            return None
+
+        tags = data['tags']
+        if not tags:
+            # gcr.io returns an empty response instead of 404
+            raise CheckFailed("No tags found for {}".format(path))
+
+        tags.sort(key=lambda t: parse_version(t))
+        return tags[-1]
 
 
 class GoogleContainerRegistry(Repo):
@@ -143,13 +195,12 @@ class GoogleContainerRegistry(Repo):
         tags = []
         args = (
             'gcloud container images list-tags '
-            'gcr.io/{}'
-        ).format(path).split()
+            '{}/{}'
+        ).format(self.host, path).split()
         try:
             output = subprocess.check_output(args)
         except Exception:
-            logging.warning('gcloud failed for %s', path)
-            return tags
+            raise CheckFailed('gcloud failed for {}'.format(path))
         lines = output.decode('utf8').splitlines()
         for l in lines[1:]:
             tags.append(l.split()[1])
@@ -157,13 +208,14 @@ class GoogleContainerRegistry(Repo):
 
     def latest_available_tag(self, path):
         tags = self.gcloud_container_images_list_tags(path)
-        if tags:
-            return tags[-1]
-        return None
+        if not tags:
+            # gcr.io returns an empty response instead of 404
+            raise CheckFailed("No tags found for {}".format(path))
+
+        return tags[-1]
 
 
 def main():
-
     rs = kubectl('get deployments --all-namespaces')
     deployments = [Deployment(spec) for spec in rs['items']]
 
@@ -174,13 +226,17 @@ def main():
 
     for w in workloads:
         for i in w.images:
-            tag = i.repo.latest_available_tag(i.path)
+            try:
+                tag = i.repo.latest_available_tag(i.path)
+            except CheckFailed as e:
+                logging.warning("{}: {}".format(i.path, e))
+                continue
+
             if (
-                    tag is not None and
                     i.tag != 'latest' and
                     parse_version(i.tag) < parse_version(tag)
             ):
-                print('{:40} {:>70} -> {:20}'.format(
+                print('{:55} {:>70} -> {:20}'.format(
                     w.full_name, i.full_url, tag))
 
 
