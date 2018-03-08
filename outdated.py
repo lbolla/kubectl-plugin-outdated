@@ -117,8 +117,16 @@ class Repo:
         else:
             return DockerRegistry(host)
 
-    def latest_available_tag(self, path):
+    def available_tags(self, path):
         return None
+
+    def latest_available_tag(self, path):
+        tags = self.available_tags(path)
+        if not tags:
+            raise CheckFailed("No tags found for {}".format(path))
+
+        tags = sorted(tags, key=lambda t: parse_version(t))
+        return tags[-1]
 
     def _fetch_json(self, host, url):
         c = http.client.HTTPSConnection(host)
@@ -141,7 +149,7 @@ class Repo:
 
 class DockerHub(Repo):
 
-    def latest_available_tag(self, path):
+    def available_tags(self, path):
         # No group for image defaults to "library"
         if '/' not in path:
             path = 'library/{}'.format(path)
@@ -151,20 +159,12 @@ class DockerHub(Repo):
         if data is None:
             return None
 
-        tags = sorted([
-            r['name']
-            for r in data['results']
-        ], key=lambda t: parse_version(t))
-
-        if not tags:
-            raise CheckFailed("No tags found for {}".format(path))
-
-        return tags[-1]
+        return [r['name'] for r in data['results']]
 
 
 class DockerRegistry(Repo):
 
-    def latest_available_tag(self, path):
+    def available_tags(self, path):
         host = self.host
         if '/' not in path:
             if host == 'k8s.gcr.io':
@@ -179,20 +179,12 @@ class DockerRegistry(Repo):
         if data is None:
             return None
 
-        tags = data['tags']
-        if not tags:
-            # gcr.io returns an empty response instead of 404
-            raise CheckFailed("No tags found for {}".format(path))
-
-        tags.sort(key=lambda t: parse_version(t))
-        return tags[-1]
+        return data['tags']
 
 
 class GoogleContainerRegistry(Repo):
 
-    @staticmethod
-    def gcloud_container_images_list_tags(path):
-        tags = []
+    def available_tags(self, path):
         args = (
             'gcloud container images list-tags '
             '{}/{}'
@@ -202,17 +194,11 @@ class GoogleContainerRegistry(Repo):
         except Exception:
             raise CheckFailed('gcloud failed for {}'.format(path))
         lines = output.decode('utf8').splitlines()
+
+        tags = []
         for l in lines[1:]:
             tags.append(l.split()[1])
-        return sorted(tags, key=lambda t: parse_version(t))
-
-    def latest_available_tag(self, path):
-        tags = self.gcloud_container_images_list_tags(path)
-        if not tags:
-            # gcr.io returns an empty response instead of 404
-            raise CheckFailed("No tags found for {}".format(path))
-
-        return tags[-1]
+        return tags
 
 
 def main():
