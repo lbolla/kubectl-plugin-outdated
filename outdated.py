@@ -120,10 +120,18 @@ class Repo:
     def available_tags(self, path):
         return None
 
-    def latest_available_tag(self, path):
+    def latest_available_tag(self, path, allow_alpha=False,
+                             allow_beta=False, allow_rc=False):
         tags = self.available_tags(path)
         if not tags:
             raise CheckFailed("No tags found for {}".format(path))
+
+        if not allow_alpha:
+            tags = [tag for tag in tags if '-alpha' not in tag]
+            if not allow_beta:
+                tags = [tag for tag in tags if '-beta' not in tag]
+                if not allow_rc:
+                    tags = [tag for tag in tags if '-rc' not in tag]
 
         tags = sorted(tags, key=lambda t: parse_version(t))
         return tags[-1]
@@ -213,7 +221,12 @@ def main():
     for w in workloads:
         for i in w.images:
             try:
-                tag = i.repo.latest_available_tag(i.path)
+                tag = i.repo.latest_available_tag(
+                    path=i.path,
+                    allow_alpha='-alpha' in i.tag,
+                    allow_beta='-beta' in i.tag,
+                    allow_rc='-rc' in i.tag,
+                )
             except CheckFailed as e:
                 logging.warning("{}: {}".format(i.path, e))
                 continue
