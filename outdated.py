@@ -167,9 +167,9 @@ class Repo:
     @staticmethod
     @lru_cache()  # cache object for token header
     def from_host(host, pull_secret=None):
-        if host == 'hub.docker.com':
+        if host == 'hub.docker.com' or host == 'docker.io':
             # Endpoints on hub.docker.com don't need authentication.
-            return DockerHub(host, pull_secret=pull_secret)
+            return DockerHub('hub.docker.com', pull_secret=pull_secret)
         elif HAS_GCLOUD and (host == 'gcr.io' or host.endswith('.gcr.io')):
             # Prefer calling gcloud, to handle private repos.
             return GoogleContainerRegistry(host, pull_secret=pull_secret)
@@ -215,6 +215,9 @@ class Repo:
 
             raise CheckFailed(
                 "Registry {} requires authentication, skipping".format(host))
+        elif r.status == 301:
+            raise CheckFailed('Request at https://{}{} returned: 301 to {}'.format(
+                host, url, r.headers['Location']))
         elif r.status != 200:
             raise CheckFailed('Request at https://{}{} returned: {}'.format(
                 host, url, r.status))
